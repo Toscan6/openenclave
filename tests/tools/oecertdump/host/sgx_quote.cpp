@@ -60,7 +60,6 @@ void log(const char* fmt, ...)
 void output_certificate(const uint8_t* data, size_t data_len)
 {
 #if defined(__linux__)
-    printf("\n");
     X509* x509;
     BIO* input = BIO_new_mem_buf(data, (int)data_len);
     x509 = d2i_X509_bio(input, nullptr);
@@ -71,25 +70,37 @@ void output_certificate(const uint8_t* data, size_t data_len)
             XN_FLAG_COMPAT,
             XN_FLAG_SEP_CPLUS_SPC | XN_FLAG_DUMP_UNKNOWN_FIELDS);
     BIO_free_all(input);
-    printf("\n");
 #endif
     OE_UNUSED(data);
     OE_UNUSED(data_len);
 }
 
-void output_certificate_chain(const uint8_t* data, size_t data_len)
+void decode_certificate_pem(const uint8_t* data, size_t data_len)
 {
 #if defined(__linux__)
+    X509* x509;
+    BIO* input = BIO_new_mem_buf(data, (int)data_len);
+    x509 = PEM_read_bio_X509(input, NULL, 0, NULL);
+    if (x509)
+        X509_print_ex_fp(
+            stdout,
+            x509,
+            XN_FLAG_COMPAT,
+            XN_FLAG_SEP_CPLUS_SPC | XN_FLAG_DUMP_UNKNOWN_FIELDS);
+    BIO_free_all(input);
+#endif
+    OE_UNUSED(data);
+    OE_UNUSED(data_len);
+}
+
+void parse_certificate_extension(const uint8_t* data, size_t data_len)
+{
     oe_result_t result = OE_FAILURE;
     oe_cert_chain_t cert_chain = {0};
     oe_cert_t leaf_cert = {0};
     ParsedExtensionInfo extension_info = {{0}};
-
-    X509* x509;
-    const char* pem = (char*)data;
     size_t buffer_size = 1024;
     uint8_t* buffer = NULL;
-    bool is_leaf_cert = true;
 
     // get leaf cert to parse sgx extension
     oe_cert_chain_read_pem(&cert_chain, data, data_len);
@@ -111,6 +122,39 @@ void output_certificate_chain(const uint8_t* data, size_t data_len)
         result = ParseSGXExtensions(
             &leaf_cert, buffer, &buffer_size, &extension_info);
     }
+    printf(
+        "\n    parsed qe certificate extension (%s) {\n",
+        SGX_EXTENSION_OID_STR);
+    printf("        ppid (hex): ");
+    oe_hex_dump(extension_info.ppid, OE_COUNTOF(extension_info.ppid));
+    printf("        comp_svn (hex): ");
+    oe_hex_dump(extension_info.comp_svn, OE_COUNTOF(extension_info.comp_svn));
+    printf("        pce_svn: 0x%x\n", extension_info.pce_svn);
+    printf("        cpu_svn (hex): ");
+    oe_hex_dump(extension_info.cpu_svn, OE_COUNTOF(extension_info.cpu_svn));
+    printf("        pce_id (hex): ");
+    oe_hex_dump(extension_info.pce_id, OE_COUNTOF(extension_info.pce_id));
+    printf("        fmspc (hex): ");
+    oe_hex_dump(extension_info.fmspc, OE_COUNTOF(extension_info.fmspc));
+    printf("        sgx_type: %d\n", extension_info.sgx_type);
+    printf(
+        "        opt_dynamic_platform: %s\n",
+        extension_info.opt_dynamic_platform ? "true" : "false");
+    printf(
+        "        opt_cached_keys: %s\n",
+        extension_info.opt_cached_keys ? "true" : "false");
+    printf("    } qe cert extension \n");
+done:
+    free(buffer);
+    oe_cert_chain_free(&cert_chain);
+    oe_cert_free(&leaf_cert);
+}
+
+void output_certificate_chain(const uint8_t* data, size_t data_len)
+{
+#if defined(__linux__)
+    const char* pem = (char*)data;
+    bool is_leaf_cert = true;
 
     // print decoded PEM certificate chain
     while (*pem)
@@ -126,51 +170,18 @@ void output_certificate_chain(const uint8_t* data, size_t data_len)
             break;
         end += OE_PEM_END_CERTIFICATE_LEN;
         // Print each certificate
-        BIO* input = BIO_new_mem_buf(pem, (int)(end - pem));
-        x509 = PEM_read_bio_X509(input, NULL, 0, NULL);
-        if (x509)
-            X509_print_ex_fp(
-                stdout, x509, XN_FLAG_COMPAT, XN_FLAG_SEP_CPLUS_SPC);
+        decode_certificate_pem((uint8_t*)pem, (size_t)(end - pem));
         // Print sgx extention in leaf certificate
         if (is_leaf_cert)
         {
-            printf(
-                "\n    parsed qe certificate extension (%s) {\n",
-                SGX_EXTENSION_OID_STR);
-            printf("        ppid (hex): ");
-            oe_hex_dump(extension_info.ppid, OE_COUNTOF(extension_info.ppid));
-            printf("        comp_svn (hex): ");
-            oe_hex_dump(
-                extension_info.comp_svn, OE_COUNTOF(extension_info.comp_svn));
-            printf("        pce_svn: 0x%x\n", extension_info.pce_svn);
-            printf("        cpu_svn (hex): ");
-            oe_hex_dump(
-                extension_info.cpu_svn, OE_COUNTOF(extension_info.cpu_svn));
-            printf("        pce_id (hex): ");
-            oe_hex_dump(
-                extension_info.pce_id, OE_COUNTOF(extension_info.pce_id));
-            printf("        fmspc (hex): ");
-            oe_hex_dump(extension_info.fmspc, OE_COUNTOF(extension_info.fmspc));
-            printf("        sgx_type: %d\n", extension_info.sgx_type);
-            printf(
-                "        opt_dynamic_platform: %s\n",
-                extension_info.opt_dynamic_platform ? "true" : "false");
-            printf(
-                "        opt_cached_keys: %s\n",
-                extension_info.opt_cached_keys ? "true" : "false");
-            printf("    } qe cert extension \n");
+            parse_certificate_extension(data, data_len);
             is_leaf_cert = false;
         }
-        BIO_free_all(input);
-        output_certificate((const uint8_t*)pem, (size_t)(end - pem));
+        printf("\n");
         while (isspace(*end))
             end++;
         pem = end;
     }
-done:
-    free(buffer);
-    oe_cert_chain_free(&cert_chain);
-    oe_cert_free(&leaf_cert);
 #endif
     OE_UNUSED(data);
     OE_UNUSED(data_len);
@@ -334,7 +345,7 @@ oe_result_t output_sgx_report(const uint8_t* report, size_t report_size)
     printf("        size: %d\n", qe_cert_data.size);
     printf("        qe cert PEM:\n");
     printf("%s\n", qe_cert_data.data);
-    printf("        qe cert (decoded):\n");
+    printf("        qe cert (decoded):\n\n");
     output_certificate_chain(qe_cert_data.data, qe_cert_data.size);
     printf("    } qe_cert_data\n");
 
@@ -404,10 +415,30 @@ oe_result_t generate_sgx_report(oe_enclave_t* enclave, bool verbose)
                 endorsements_data_size,
                 &endorsements);
 
-            log("Revocation TCB_INFO:\n");
+            oe_sgx_endorsement_item endorsement_version =
+                endorsements.items[OE_SGX_ENDORSEMENT_FIELD_VERSION];
+            log("Endorsement Version:\n%d\n\n", *(endorsement_version.data));
+
             oe_sgx_endorsement_item tcb_info =
                 endorsements.items[OE_SGX_ENDORSEMENT_FIELD_TCB_INFO];
-            log("%s\n\n", tcb_info.data);
+            log("Revocation TCB Info:\n%s\n\n", tcb_info.data);
+
+            oe_sgx_endorsement_item crl_pck_cert =
+                endorsements.items[OE_SGX_ENDORSEMENT_FIELD_CRL_PCK_CERT];
+            log("CRL PCK Certificate:\n%s\n\n", crl_pck_cert.data);
+
+            oe_sgx_endorsement_item crl_pck_proc_ca =
+                endorsements.items[OE_SGX_ENDORSEMENT_FIELD_CRL_PCK_PROC_CA];
+            log("CRL PCK Proc CA:\n%s\n\n", crl_pck_proc_ca.data);
+
+            oe_sgx_endorsement_item qe_id_info =
+                endorsements.items[OE_SGX_ENDORSEMENT_FIELD_QE_ID_INFO];
+            log("QE ID Info:\n%s\n\n", qe_id_info.data);
+
+            oe_sgx_endorsement_item creation_datetime =
+                endorsements.items[OE_SGX_ENDORSEMENT_FIELD_CREATION_DATETIME];
+            log("Endorsement Creation Datetime:\n%s\n\n",
+                creation_datetime.data);
 
             oe_free_sgx_endorsements(endorsements_data);
         }

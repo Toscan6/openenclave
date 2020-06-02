@@ -9,6 +9,8 @@
 
 void log(const char* fmt, ...);
 void output_certificate(const uint8_t* data, size_t data_len);
+void decode_certificate_pem(const uint8_t* data, size_t data_len);
+void parse_certificate_extension(const uint8_t* data, size_t data_len);
 void output_certificate_chain(const uint8_t* data, size_t data_len);
 void oecertdump_quote_provider_log(
     sgx_ql_log_level_t level,
