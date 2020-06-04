@@ -75,7 +75,7 @@ void output_certificate(const uint8_t* data, size_t data_len)
     OE_UNUSED(data_len);
 }
 
-void decode_certificate_pem(const uint8_t* data, size_t data_len)
+void decode_certificate_pem(FILE* file, const uint8_t* data, size_t data_len)
 {
 #if defined(__linux__)
     X509* x509;
@@ -83,10 +83,24 @@ void decode_certificate_pem(const uint8_t* data, size_t data_len)
     x509 = PEM_read_bio_X509(input, NULL, 0, NULL);
     if (x509)
         X509_print_ex_fp(
-            stdout,
+            file,
             x509,
             XN_FLAG_COMPAT,
             XN_FLAG_SEP_CPLUS_SPC | XN_FLAG_DUMP_UNKNOWN_FIELDS);
+    BIO_free_all(input);
+#endif
+    OE_UNUSED(data);
+    OE_UNUSED(data_len);
+}
+
+void decode_crl_pem(FILE* file, const uint8_t* data, size_t data_len)
+{
+#if defined(__linux__)
+    X509_CRL* x509;
+    BIO* input = BIO_new_mem_buf(data, (int)data_len);
+    x509 = PEM_read_bio_X509_CRL(input, NULL, NULL, NULL);
+    if (x509)
+        X509_CRL_print_fp(file, x509);
     BIO_free_all(input);
 #endif
     OE_UNUSED(data);
@@ -150,11 +164,19 @@ done:
     oe_cert_free(&leaf_cert);
 }
 
-void output_certificate_chain(const uint8_t* data, size_t data_len)
+void output_certificate_chain(
+    const uint8_t* data,
+    size_t data_len,
+    bool is_report_buffer)
 {
 #if defined(__linux__)
     const char* pem = (char*)data;
-    bool is_leaf_cert = true;
+    // This test tools output certificate chain in two scenarios:
+    // 1. Log certificate chain in endorsement buffer to log file
+    // 2. Print certificate chain in report buffer in verbose mode to stdout
+    // Only the leaf certificate in report buffer contains sgx extension
+    bool leaf_cert_extension = is_report_buffer;
+    FILE* file = is_report_buffer ? stdout : log_file;
 
     // print decoded PEM certificate chain
     while (*pem)
@@ -170,14 +192,17 @@ void output_certificate_chain(const uint8_t* data, size_t data_len)
             break;
         end += OE_PEM_END_CERTIFICATE_LEN;
         // Print each certificate
-        decode_certificate_pem((uint8_t*)pem, (size_t)(end - pem));
-        // Print sgx extention in leaf certificate
-        if (is_leaf_cert)
+        decode_certificate_pem(file, (uint8_t*)pem, (size_t)(end - pem));
+        // Parse sgx extention in leaf certificate
+        if (leaf_cert_extension)
         {
             parse_certificate_extension(data, data_len);
-            is_leaf_cert = false;
+            leaf_cert_extension = false;
         }
-        printf("\n");
+        if (is_report_buffer)
+            printf("\n");
+        else
+            log("\n");
         while (isspace(*end))
             end++;
         pem = end;
@@ -343,10 +368,8 @@ oe_result_t output_sgx_report(const uint8_t* report, size_t report_size)
     printf("    qe_cert_data {\n");
     printf("        type: 0x%x\n", qe_cert_data.type);
     printf("        size: %d\n", qe_cert_data.size);
-    printf("        qe cert PEM:\n");
-    printf("%s\n", qe_cert_data.data);
-    printf("        qe cert (decoded):\n\n");
-    output_certificate_chain(qe_cert_data.data, qe_cert_data.size);
+    printf("        qe cert (decoded from PEM):\n\n");
+    output_certificate_chain(qe_cert_data.data, qe_cert_data.size, true);
     printf("    } qe_cert_data\n");
 
     printf("} oe_report_header\n");
@@ -407,7 +430,7 @@ oe_result_t generate_sgx_report(oe_enclave_t* enclave, bool verbose)
                 goto exit;
             }
 
-            log("========== Got endorsements, size = %zu\n",
+            log("\n\n========== Got endorsements, size = %zu\n",
                 endorsements_data_size);
             oe_sgx_endorsements_t endorsements;
             result = oe_parse_sgx_endorsements(
@@ -417,27 +440,51 @@ oe_result_t generate_sgx_report(oe_enclave_t* enclave, bool verbose)
 
             oe_sgx_endorsement_item endorsement_version =
                 endorsements.items[OE_SGX_ENDORSEMENT_FIELD_VERSION];
-            log("Endorsement Version:\n%d\n\n", *(endorsement_version.data));
+            log("Endorsement: Version:\n%d\n\n", *(endorsement_version.data));
 
             oe_sgx_endorsement_item tcb_info =
                 endorsements.items[OE_SGX_ENDORSEMENT_FIELD_TCB_INFO];
-            log("Revocation TCB Info:\n%s\n\n", tcb_info.data);
+            log("Endorsement: Revocation TCB Info:\n%s\n\n", tcb_info.data);
+
+            oe_sgx_endorsement_item tcb_issuer_chain =
+                endorsements.items[OE_SGX_ENDORSEMENT_FIELD_TCB_ISSUER_CHAIN];
+            log("Endorsement: Revocation TCB Issuer Chain:\n");
+            output_certificate_chain(
+                tcb_issuer_chain.data, tcb_issuer_chain.size, false);
 
             oe_sgx_endorsement_item crl_pck_cert =
                 endorsements.items[OE_SGX_ENDORSEMENT_FIELD_CRL_PCK_CERT];
-            log("CRL PCK Certificate:\n%s\n\n", crl_pck_cert.data);
+            log("Endorsement: CRL PCK Certificate:\n");
+            decode_crl_pem(log_file, crl_pck_cert.data, crl_pck_cert.size);
+            log("\n");
 
             oe_sgx_endorsement_item crl_pck_proc_ca =
                 endorsements.items[OE_SGX_ENDORSEMENT_FIELD_CRL_PCK_PROC_CA];
-            log("CRL PCK Proc CA:\n%s\n\n", crl_pck_proc_ca.data);
+            log("Endorsement: CRL PCK Proc CA:\n");
+            decode_crl_pem(
+                log_file, crl_pck_proc_ca.data, crl_pck_proc_ca.size);
+            log("\n");
+
+            oe_sgx_endorsement_item crl_issuer_chain =
+                endorsements
+                    .items[OE_SGX_ENDORSEMENT_FIELD_CRL_ISSUER_CHAIN_PCK_CERT];
+            log("Endorsement: CRL Issuer Chain:\n");
+            output_certificate_chain(
+                crl_issuer_chain.data, crl_issuer_chain.size, false);
 
             oe_sgx_endorsement_item qe_id_info =
                 endorsements.items[OE_SGX_ENDORSEMENT_FIELD_QE_ID_INFO];
-            log("QE ID Info:\n%s\n\n", qe_id_info.data);
+            log("Endorsement: QE ID Info:\n%s\n\n", qe_id_info.data);
+
+            oe_sgx_endorsement_item qe_id_issuer_chain =
+                endorsements.items[OE_SGX_ENDORSEMENT_FIELD_QE_ID_ISSUER_CHAIN];
+            log("Endorsement: QE ID Issuer Chain:\n");
+            output_certificate_chain(
+                qe_id_issuer_chain.data, qe_id_issuer_chain.size, false);
 
             oe_sgx_endorsement_item creation_datetime =
                 endorsements.items[OE_SGX_ENDORSEMENT_FIELD_CREATION_DATETIME];
-            log("Endorsement Creation Datetime:\n%s\n\n",
+            log("Endorsement: Creation Datetime:\n%s\n\n",
                 creation_datetime.data);
 
             oe_free_sgx_endorsements(endorsements_data);
