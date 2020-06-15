@@ -11,13 +11,6 @@
 #include <string.h>
 #include "oecertdump_u.h"
 
-#if defined(__linux__)
-#include <dlfcn.h>
-#include <openssl/bio.h>
-#include <openssl/pem.h>
-#include <openssl/x509.h>
-#endif
-
 #include "sgx_quote.h"
 
 #ifdef OE_LINK_SGX_DCAP_QL
